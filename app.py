@@ -1,154 +1,71 @@
+import os
 from datetime import datetime, timezone
 
-from flask import Flask, jsonify, request
+from flask import Flask, jsonify
+from sqlalchemy import text
 from werkzeug.exceptions import HTTPException
 
+from extensions import db
 
-app = Flask(__name__)
-app.json.ensure_ascii = False
+from dotenv import load_dotenv
+load_dotenv(override=True)
 
-tasks = []
-next_task_id = 1
-
-HTTP_ERROR_TRANSLATIONS = {
-    400: "請求錯誤",
-    401: "未經授權",
-    403: "禁止存取",
-    404: "找不到資源",
-    405: "不允許此 HTTP 方法",
-    406: "無法接受的格式",
-    408: "請求逾時",
-    409: "發生衝突",
-    410: "資源已不存在",
-    413: "請求內容過大",
-    414: "請求網址過長",
-    415: "不支援的媒體類型",
-    422: "無法處理的內容",
-    429: "請求過於頻繁",
-    500: "伺服器內部錯誤",
-    501: "尚未支援此功能",
-    502: "閘道錯誤",
-    503: "服務暫時無法使用",
-    504: "閘道逾時",
-}
-
-
-def bilingual_message(english, traditional_chinese):
-    return f"{english} / {traditional_chinese}"
-
-
-def make_response(status, message, data, http_status):
+def json_response(code: int, message: str, data=None):
     return jsonify(
         {
-            "status": status,
+            "code": code,
             "message": message,
             "data": data,
         }
-    ), http_status
+    ), code
 
 
-@app.errorhandler(HTTPException)
-def handle_http_error(error):
-    message = bilingual_message(
-        error.description,
-        HTTP_ERROR_TRANSLATIONS.get(error.code, "HTTP 錯誤"),
-    )
-    return make_response("error", message, None, error.code)
+def create_app():
+    app = Flask(__name__)
+    app.json.ensure_ascii = False
 
-
-@app.get("/api/health")
-def health_check():
-    return make_response(
-        "success",
-        bilingual_message("Server is running", "伺服器運作中"),
-        {
-            "status": "healthy",
-            "timestamp": datetime.now(timezone.utc).isoformat(),
-        },
-        200,
-    )
-
-
-@app.get("/api/tasks")
-def get_tasks():
-    return make_response(
-        "success",
-        bilingual_message("Tasks retrieved successfully", "已成功取得任務"),
-        tasks,
-        200,
-    )
-
-
-@app.post("/api/tasks")
-def create_task():
-    global next_task_id
-
-    if not request.is_json:
-        return make_response(
-            "error",
-            bilingual_message(
-                "Request body must be valid JSON",
-                "請求本文必須是有效的 JSON",
-            ),
-            None,
-            400,
+    database_url = os.getenv("DATABASE_URL")
+    if not database_url:
+        raise RuntimeError(
+            "缺少環境變數 DATABASE_URL，無法啟動應用程式。"
+            "請先在程序環境中設定 PostgreSQL 連線字串。"
         )
 
-    payload = request.get_json()
-    if not isinstance(payload, dict):
-        return make_response(
-            "error",
-            bilingual_message("JSON body must be an object", "JSON 本文必須是物件"),
-            None,
-            400,
+    app.config["SQLALCHEMY_DATABASE_URI"] = database_url
+    app.config["SQLALCHEMY_TRACK_MODIFICATIONS"] = False
+    db.init_app(app)
+
+    @app.errorhandler(HTTPException)
+    def handle_http_exception(error):
+        code = error.code or 500
+        message = "找不到這一筆" if code == 404 else error.description
+        return json_response(code, message, None)
+
+    @app.get("/api/health")
+    def health_check():
+        return json_response(
+            200,
+            "伺服器運作正常，測試正常可以進行其他任務。",
+            {
+                "status": "ok",
+                "time": datetime.now(timezone.utc).isoformat(),
+            },
         )
 
-    title = payload.get("title")
-    if not isinstance(title, str) or not title.strip():
-        return make_response(
-            "error",
-            bilingual_message(
-                "A non-empty title is required",
-                "標題為必填欄位，且不可為空",
-            ),
-            None,
-            400,
-        )
+    @app.get("/api/health/db")
+    def database_health_check():
+        try:
+            db.session.execute(text("SELECT 1"))
+        except Exception:
+            app.logger.exception("資料庫連線檢查失敗")
+            return json_response(500, "資料庫暫時連不上", None)
 
-    task = {
-        "id": next_task_id,
-        "title": title,
-        "description": payload.get("description", ""),
-    }
-    tasks.append(task)
-    next_task_id += 1
+        return json_response(200, "資料庫連線正常", {"status": "ok"})
 
-    return make_response(
-        "success",
-        bilingual_message("Task created successfully", "已成功建立任務"),
-        task,
-        201,
-    )
+    return app
 
 
-@app.get("/api/tasks/<int:task_id>")
-def get_task(task_id):
-    task = next((task for task in tasks if task["id"] == task_id), None)
-    if task is None:
-        return make_response(
-            "error",
-            bilingual_message("Task not found", "找不到任務"),
-            None,
-            404,
-        )
-
-    return make_response(
-        "success",
-        bilingual_message("Task retrieved successfully", "已成功取得任務"),
-        task,
-        200,
-    )
-
+app = create_app()
 
 if __name__ == "__main__":
     app.run(host="127.0.0.1", port=5000, debug=True)
